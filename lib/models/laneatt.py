@@ -1,4 +1,5 @@
 import math
+import time
 
 import cv2
 import torch
@@ -105,13 +106,14 @@ class LaneATT(nn.Module):
         reg_proposals[:, :, 4:] += reg
 
         # Apply nms
-        proposals_list = self.nms(reg_proposals, attention_matrix, nms_thres, nms_topk, conf_threshold)
+        proposals_list, t = self.nms(reg_proposals, attention_matrix, nms_thres, nms_topk, conf_threshold)
 
-        return proposals_list
+        return proposals_list, t
 
     def nms(self, batch_proposals, batch_attention_matrix, nms_thres, nms_topk, conf_threshold):
         softmax = nn.Softmax(dim=1)
         proposals_list = []
+        time_total = 0
         for proposals, attention_matrix in zip(batch_proposals, batch_attention_matrix):
             anchor_inds = torch.arange(batch_proposals.shape[1], device=proposals.device)
             # The gradients do not have to (and can't) be calculated for the NMS procedure
@@ -126,14 +128,19 @@ class LaneATT(nn.Module):
                 if proposals.shape[0] == 0:
                     proposals_list.append((proposals[[]], self.anchors[[]], attention_matrix[[]], None))
                     continue
+
+                torch.cuda.current_stream(device).synchronize()
+                t_start = time.perf_counter()
                 keep, num_to_keep, _ = nms(proposals, scores, overlap=nms_thres, top_k=nms_topk)
+                torch.cuda.current_stream(device).synchronize()
+                time_total += time.perf_counter() - t_start
                 keep = keep[:num_to_keep]
             proposals = proposals[keep]
             anchor_inds = anchor_inds[keep]
             attention_matrix = attention_matrix[anchor_inds]
             proposals_list.append((proposals, self.anchors[keep], attention_matrix, anchor_inds))
 
-        return proposals_list
+        return proposals_list, time_total
 
     def loss(self, proposals_list, targets, cls_loss_weight=10):
         focal_loss = FocalLoss(alpha=0.25, gamma=2.)
